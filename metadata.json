@@ -1,0 +1,6 @@
+{
+  "name": "AI Nutritionist",
+  "description": "Professional nutritionist AI and food recognition expert. Analyze meals, track daily macro objectives, and log nutritional history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
