@@ -79,7 +79,11 @@ fun NutritionistApp(
     val targetFat by viewModel.targetFat.collectAsStateWithLifecycle()
     val targetFiber by viewModel.targetFiber.collectAsStateWithLifecycle()
 
+    val waterIntake by viewModel.waterIntake.collectAsStateWithLifecycle()
+    val targetWater by viewModel.targetWater.collectAsStateWithLifecycle()
+
     var showGoalDialog by remember { mutableStateOf(false) }
+    var showManualLogDialog by remember { mutableStateOf(false) }
 
     // Contracts for capturing images
     val galleryLauncher = rememberLauncherForActivityResult(
@@ -284,12 +288,38 @@ fun NutritionistApp(
                 )
             }
 
+            // Hydration Tracking
+            item {
+                WaterTrackerCard(
+                    waterIntake = waterIntake,
+                    targetWater = targetWater,
+                    onAddWater = { viewModel.addWater(it) },
+                    onResetWater = { viewModel.resetWater() }
+                )
+            }
+
+            // Weekly Calorie Trends Analytics
+            item {
+                WeeklyTrendsCard(
+                    mealHistory = mealHistory,
+                    targetCalories = targetCalories
+                )
+            }
+
             // Quick Scan Presets Section
             item {
                 PresetScannerSection(
                     onPresetSelected = { resourceId ->
                         viewModel.selectPresetMeal(resourceId)
                     }
+                )
+            }
+
+            // Text-based AI Meal Description
+            item {
+                TextMealSearchCard(
+                    onAnalyzeText = { viewModel.analyzeTextMeal(it) },
+                    onManualLog = { showManualLogDialog = true }
                 )
             }
 
@@ -589,6 +619,17 @@ fun NutritionistApp(
             onSave = { cal, prot, carb, fat, fib ->
                 viewModel.updateDailyTargets(cal, prot, carb, fat, fib)
                 showGoalDialog = false
+            }
+        )
+    }
+
+    // Manual quick log dialog
+    if (showManualLogDialog) {
+        ManualLogDialog(
+            onDismiss = { showManualLogDialog = false },
+            onSave = { name, cal, prot, carb, fat, fib ->
+                viewModel.logManualMeal(name, cal, prot, carb, fat, fib)
+                showManualLogDialog = false
             }
         )
     }
@@ -1595,18 +1636,44 @@ fun LoggedMealCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val (catLabel, catIcon, catColor) = getMealCategoryDetails(meal.timestamp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(catColor.copy(alpha = 0.12f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = catIcon,
+                                contentDescription = catLabel,
+                                tint = catColor,
+                                modifier = Modifier.size(10.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = catLabel.uppercase(),
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = catColor
+                            )
+                        }
+
                         Text(
                             text = "${meal.totalCalories.toInt()} kcal",
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+
                         Text(
                             text = formatTimestamp(meal.timestamp),
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1992,3 +2059,524 @@ fun SegmentedMacroBar(
         }
     }
 }
+
+@Composable
+fun rememberWeeklyCalorieData(mealHistory: List<MealScan>, targetCalories: Double): List<Pair<String, Float>> {
+    return remember(mealHistory) {
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val dayFormat = SimpleDateFormat("EEE", Locale.US)
+
+        val dailyMap = mutableMapOf<String, Float>()
+        val dateList = mutableListOf<Pair<String, String>>()
+
+        for (i in 6 downTo 0) {
+            val d = java.util.Calendar.getInstance().apply { add(java.util.Calendar.DAY_OF_YEAR, -i) }
+            val dateKey = sdf.format(d.time)
+            val dayLabel = dayFormat.format(d.time)
+            dailyMap[dateKey] = 0f
+            dateList.add(dateKey to dayLabel)
+        }
+
+        mealHistory.forEach { scan ->
+            val scanDate = sdf.format(Date(scan.timestamp))
+            if (dailyMap.containsKey(scanDate)) {
+                dailyMap[scanDate] = dailyMap[scanDate]!! + scan.totalCalories.toFloat()
+            }
+        }
+
+        dateList.map { (dateKey, label) ->
+            label to dailyMap[dateKey]!!
+        }
+    }
+}
+
+@Composable
+fun WeeklyTrendsCard(
+    mealHistory: List<MealScan>,
+    targetCalories: Double
+) {
+    val weeklyData = rememberWeeklyCalorieData(mealHistory, targetCalories)
+    val maxCalVal = remember(weeklyData, targetCalories) {
+        maxOf(weeklyData.maxOfOrNull { it.second } ?: 0f, targetCalories.toFloat(), 1000f) * 1.15f
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Slate100),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = "7-Day Calorie Trends",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Slate900
+            )
+            Text(
+                text = "Tracking your daily intake compared to your current target",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val canvasWidth = size.width
+                    val canvasHeight = size.height
+                    
+                    val barWidth = 32.dp.toPx()
+                    val totalSpacing = canvasWidth - (barWidth * 7)
+                    val barSpacing = totalSpacing / 8
+
+                    val targetY = canvasHeight - (targetCalories.toFloat() / maxCalVal) * canvasHeight
+
+                    val pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)
+                    drawLine(
+                        color = Color.Red.copy(alpha = 0.5f),
+                        start = androidx.compose.ui.geometry.Offset(0f, targetY),
+                        end = androidx.compose.ui.geometry.Offset(canvasWidth, targetY),
+                        strokeWidth = 2.dp.toPx(),
+                        pathEffect = pathEffect
+                    )
+
+                    weeklyData.forEachIndexed { index, (label, valAmount) ->
+                        val x = barSpacing + index * (barWidth + barSpacing)
+                        val barHeight = (valAmount / maxCalVal) * canvasHeight
+                        val y = canvasHeight - barHeight
+
+                        drawRoundRect(
+                            color = Slate100.copy(alpha = 0.5f),
+                            topLeft = androidx.compose.ui.geometry.Offset(x, 0f),
+                            size = androidx.compose.ui.geometry.Size(barWidth, canvasHeight),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx(), 10.dp.toPx())
+                        )
+
+                        if (valAmount > 0f) {
+                            val brush = Brush.verticalGradient(
+                                colors = listOf(PrimaryTeal, Teal700),
+                                startY = y,
+                                endY = canvasHeight
+                            )
+                            drawRoundRect(
+                                brush = brush,
+                                topLeft = androidx.compose.ui.geometry.Offset(x, y),
+                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx(), 10.dp.toPx())
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceAround
+            ) {
+                weeklyData.forEach { (label, valAmount) ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = label,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate900
+                        )
+                        Text(
+                            text = if (valAmount > 0) "${valAmount.toInt()}" else "-",
+                            fontSize = 10.sp,
+                            color = if (valAmount >= targetCalories) PrimaryTeal else Color.Gray,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WaterTrackerCard(
+    waterIntake: Int,
+    targetWater: Int,
+    onAddWater: (Int) -> Unit,
+    onResetWater: () -> Unit
+) {
+    val progress = if (targetWater > 0) {
+        (waterIntake.toFloat() / targetWater.toFloat()).coerceIn(0f, 1f)
+    } else 0f
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Slate100),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Hydration Tracker",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Slate900
+                    )
+                    Text(
+                        text = "Keep up with your daily water goal",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(Color(0xFFEFF6FF), CircleShape)
+                        .clickable { onResetWater() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Reset Water",
+                        tint = Color(0xFF3B82F6),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(90.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFFF0F9FF)),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val canvasWidth = size.width
+                        val canvasHeight = size.height
+                        val waterHeight = canvasHeight * progress
+                        
+                        drawRect(
+                            color = Color(0xFF60A5FA),
+                            topLeft = androidx.compose.ui.geometry.Offset(0f, canvasHeight - waterHeight),
+                            size = androidx.compose.ui.geometry.Size(canvasWidth, waterHeight)
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WaterDrop,
+                            contentDescription = "Water Drop",
+                            tint = if (progress > 0.4f) Color.White else Color(0xFF2563EB),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "${(progress * 100).toInt()}%",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (progress > 0.4f) Color.White else Color(0xFF1E3A8A)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "$waterIntake ml / $targetWater ml",
+                        fontWeight = FontWeight.Black,
+                        fontSize = 20.sp,
+                        color = Slate900
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { onAddWater(250) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                            contentPadding = PaddingValues(vertical = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocalCafe,
+                                contentDescription = "Cup",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("+250ml", fontSize = 11.sp)
+                        }
+
+                        Button(
+                            onClick = { onAddWater(500) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1D4ED8)),
+                            contentPadding = PaddingValues(vertical = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocalDrink,
+                                contentDescription = "Bottle",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("+500ml", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TextMealSearchCard(
+    onAnalyzeText: (String) -> Unit,
+    onManualLog: () -> Unit
+) {
+    var textInput by remember { mutableStateOf("") }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Slate100),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = "Describe What You Ate",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Slate900
+            )
+            Text(
+                text = "Input a text description to estimate USDA calorie breakdown instantly",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = textInput,
+                onValueChange = { textInput = it },
+                placeholder = {
+                    Text(
+                        text = "e.g., 2 medium scrambled eggs with a handful of spinach and one sourdough slice",
+                        fontSize = 13.sp,
+                        color = Color.Gray
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(80.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = PrimaryTeal,
+                    unfocusedBorderColor = Slate100
+                ),
+                maxLines = 3
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { onManualLog() },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Slate100)
+                ) {
+                    Text("Manual Quick Log", fontSize = 12.sp, color = Slate900, fontWeight = FontWeight.Bold)
+                }
+
+                Button(
+                    onClick = {
+                        if (textInput.isNotBlank()) {
+                            onAnalyzeText(textInput)
+                            textInput = ""
+                        }
+                    },
+                    enabled = textInput.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryTeal)
+                ) {
+                    Icon(imageVector = Icons.Default.Send, contentDescription = "AI")
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Analyze with AI", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ManualLogDialog(
+    onDismiss: () -> Unit,
+    onSave: (name: String, calories: Double, protein: Double, carbs: Double, fat: Double, fiber: Double) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var calories by remember { mutableStateOf("") }
+    var protein by remember { mutableStateOf("") }
+    var carbs by remember { mutableStateOf("") }
+    var fat by remember { mutableStateOf("") }
+    var fiber by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(24.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "Manual Quick Log",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 20.sp,
+                    color = Slate900
+                )
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Meal Name") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                OutlinedTextField(
+                    value = calories,
+                    onValueChange = { calories = it },
+                    label = { Text("Calories (kcal)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = protein,
+                        onValueChange = { protein = it },
+                        label = { Text("Protein (g)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    OutlinedTextField(
+                        value = carbs,
+                        onValueChange = { carbs = it },
+                        label = { Text("Carbs (g)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = fat,
+                        onValueChange = { fat = it },
+                        label = { Text("Fat (g)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    OutlinedTextField(
+                        value = fiber,
+                        onValueChange = { fiber = it },
+                        label = { Text("Fiber (g)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Cancel", color = Slate900)
+                    }
+
+                    Button(
+                        onClick = {
+                            onSave(
+                                name.ifBlank { "Custom Log" },
+                                calories.toDoubleOrNull() ?: 0.0,
+                                protein.toDoubleOrNull() ?: 0.0,
+                                carbs.toDoubleOrNull() ?: 0.0,
+                                fat.toDoubleOrNull() ?: 0.0,
+                                fiber.toDoubleOrNull() ?: 0.0
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryTeal)
+                    ) {
+                        Text("Log Meal")
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun getMealCategoryDetails(timestamp: Long): Triple<String, androidx.compose.ui.graphics.vector.ImageVector, Color> {
+    val hour = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }.get(java.util.Calendar.HOUR_OF_DAY)
+    return when (hour) {
+        in 5..10 -> Triple("Breakfast", Icons.Default.Coffee, Color(0xFFFBBF24))
+        in 11..15 -> Triple("Lunch", Icons.Default.Restaurant, Color(0xFFF97316))
+        in 16..21 -> Triple("Dinner", Icons.Default.Restaurant, Color(0xFF6366F1))
+        else -> Triple("Snack", Icons.Default.Fastfood, Color(0xFFEC4899))
+    }
+}
+

@@ -71,6 +71,13 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
     private val _targetFiber = MutableStateFlow(25.0)
     val targetFiber = _targetFiber.asStateFlow()
 
+    // Water Tracking states
+    private val _waterIntake = MutableStateFlow(0)
+    val waterIntake = _waterIntake.asStateFlow()
+
+    private val _targetWater = MutableStateFlow(2000)
+    val targetWater = _targetWater.asStateFlow()
+
     private val moshi = GeminiRetrofitClient.moshi
 
     init {
@@ -80,6 +87,10 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
         _targetCarbs.value = sharedPrefs.getFloat("target_carbs", 230f).toDouble()
         _targetFat.value = sharedPrefs.getFloat("target_fat", 65f).toDouble()
         _targetFiber.value = sharedPrefs.getFloat("target_fiber", 25f).toDouble()
+
+        // Water tracking auto reset and load
+        checkAndResetWaterIntake()
+        _targetWater.value = sharedPrefs.getInt("target_water", 2000)
     }
 
     fun updateDailyTargets(calories: Double, protein: Double, carbs: Double, fat: Double, fiber: Double) {
@@ -156,12 +167,21 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
 
                 // Nutrition evaluation rules (as requested by user)
                 val corePrompt = """
-                    You are a professional nutritionist AI and food recognition expert. Your job is to analyze food images and return a precise calorie and nutrition breakdown.
+                    You are a professional nutritionist AI and food recognition expert. Your job is to analyze food images and return a highly accurate calorie and nutrition breakdown based strictly on USDA FoodData Central standards.
 
-                    When the user uploads a food image:
-                    1. Identify every visible food item in the image.
-                    2. Estimate the portion size of each item in grams (use typical serving sizes if unclear).
-                    3. Return a structured JSON response with this exact schema:
+                    Estimation Logic & Hidden Calories:
+                    1. Decompose the image and identify every ingredient, including base ingredients, toppings, spreads, and dressings.
+                    2. **CRITICAL: Estimate hidden cooking oils, butter, sugars, and sauces.** These are the most common sources of hidden calories. Always assume standard cooking fats are present unless it is clearly raw or steamed.
+                    3. Use these standard portion weight anchors for reference:
+                       - Standard slice of bread: 35-40g
+                       - Large egg: 50g
+                       - Palm-sized chicken breast/meat fillet: 120-150g
+                       - 1 tablespoon of cooking oil/butter: 14g
+                       - Medium piece of fruit (apple, banana): 120-150g
+                       - 1 cup of cooked rice/pasta: 150-180g
+                    4. Check mathematical consistency: **Total Calories MUST strictly equal (Protein * 4) + (Carbs * 4) + (Fat * 9)**. Adjust individual item calories and totals to ensure this exact mathematical relationship is satisfied.
+
+                    Return a structured JSON response with this exact schema:
 
                     {
                       "meal_name": "string — short descriptive name of the overall meal",
@@ -192,7 +212,6 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
                     - Always respond ONLY with valid JSON. No preamble, no markdown backticks.
                     - If you cannot identify a food item, include it with name "Unknown item" and confidence "low".
                     - Round all numbers to 1 decimal place.
-                    - Base calorie values on USDA FoodData Central standards.
                     - If the image contains no food, return: {"error": "No food detected in the image."}
                     - For mixed dishes (curry, stew, salad), break down into estimated main components.
                 """.trimIndent()
@@ -375,12 +394,260 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun checkAndResetWaterIntake() {
+        val todayStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+        val lastResetDate = sharedPrefs.getString("last_water_reset_date", "")
+        if (todayStr != lastResetDate) {
+            sharedPrefs.edit().apply {
+                putInt("water_intake", 0)
+                putString("last_water_reset_date", todayStr)
+                apply()
+            }
+            _waterIntake.value = 0
+        } else {
+            _waterIntake.value = sharedPrefs.getInt("water_intake", 0)
+        }
+    }
+
+    fun addWater(ml: Int) {
+        viewModelScope.launch {
+            checkAndResetWaterIntake()
+            val newIntake = _waterIntake.value + ml
+            _waterIntake.value = newIntake
+            sharedPrefs.edit().putInt("water_intake", newIntake).apply()
+        }
+    }
+
+    fun resetWater() {
+        viewModelScope.launch {
+            _waterIntake.value = 0
+            sharedPrefs.edit().putInt("water_intake", 0).apply()
+        }
+    }
+
+    fun updateWaterTarget(ml: Int) {
+        viewModelScope.launch {
+            _targetWater.value = ml
+            sharedPrefs.edit().putInt("target_water", ml).apply()
+        }
+    }
+
+    /**
+     * AI Food text analyzer
+     */
+    fun analyzeTextMeal(description: String) {
+        if (description.isBlank()) return
+        viewModelScope.launch {
+            _uiState.value = NutritionUiState.Loading
+
+            val apiKey = BuildConfig.GEMINI_API_KEY
+            if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+                kotlinx.coroutines.delay(1200)
+                val response = getSimulatedTextResponse(description)
+                _uiState.value = NutritionUiState.Success(response, null, isSimulated = true)
+                return@launch
+            }
+
+            try {
+                val corePrompt = """
+                    You are a professional nutritionist AI and food recognition expert. Your job is to analyze descriptions of food eaten and return a highly accurate calorie and nutrition breakdown based strictly on USDA FoodData Central standards.
+
+                    Estimation Logic & Hidden Calories:
+                    1. Decompose the described meal and identify every ingredient, including base ingredients, toppings, spreads, and dressings.
+                    2. **CRITICAL: Estimate hidden cooking oils, butter, sugars, and sauces.** These are the most common sources of hidden calories. Always assume standard cooking fats are present unless it is clearly described as raw or steamed.
+                    3. Use these standard portion weight anchors for reference:
+                       - Standard slice of bread: 35-40g
+                       - Large egg: 50g
+                       - Palm-sized chicken breast/meat fillet: 120-150g
+                       - 1 tablespoon of cooking oil/butter: 14g
+                       - Medium piece of fruit (apple, banana): 120-150g
+                       - 1 cup of cooked rice/pasta: 150-180g
+                    4. Check mathematical consistency: **Total Calories MUST strictly equal (Protein * 4) + (Carbs * 4) + (Fat * 9)**. Adjust individual item calories and totals to ensure this exact mathematical relationship is satisfied.
+
+                    Return a structured JSON response with this exact schema:
+
+                    {
+                      "meal_name": "string — short descriptive name of the overall meal",
+                      "total_calories": number,
+                      "total_macros": {
+                        "protein_g": number,
+                        "carbs_g": number,
+                        "fat_g": number,
+                        "fiber_g": number
+                      },
+                      "items": [
+                        {
+                          "name": "string — food item name",
+                          "portion_g": number,
+                          "calories": number,
+                          "protein_g": number,
+                          "carbs_g": number,
+                          "fat_g": number,
+                          "confidence": "high | medium | low"
+                        }
+                      ],
+                      "health_score": number (1–10, where 10 is most nutritious),
+                      "health_note": "string — 1–2 sentence personalized tip about this meal",
+                      "warnings": ["string"] or []
+                    }
+
+                    Rules:
+                    - Always respond ONLY with valid JSON. No preamble, no markdown backticks.
+                    - If you cannot identify a food item, include it with name "Unknown item" and confidence "low".
+                    - Round all numbers to 1 decimal place.
+                    - If the description does not refer to food, return: {"error": "The text does not seem to contain food or meal items."}
+                """.trimIndent()
+
+                val request = GeminiRequest(
+                    contents = listOf(
+                        GeminiContent(
+                            parts = listOf(
+                                GeminiPart(text = "Analyze my meal: ${description}")
+                            )
+                        )
+                    ),
+                    generationConfig = GeminiResponseConfig(
+                        responseMimeType = "application/json",
+                        temperature = 0.2
+                    ),
+                    systemInstruction = GeminiContent(
+                        parts = listOf(GeminiPart(text = corePrompt))
+                    )
+                )
+
+                val rawResponse = GeminiRetrofitClient.service.generateContent(apiKey, request)
+                val rawText = rawResponse.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                if (rawText != null) {
+                    val sanitizedJson = rawText.trim()
+                        .removePrefix("```json")
+                        .removePrefix("```")
+                        .removeSuffix("```")
+                        .trim()
+
+                    val adapter = moshi.adapter(GeminiNutritionResponse::class.java)
+                    val result = adapter.fromJson(sanitizedJson)
+
+                    if (result != null) {
+                        if (result.error != null) {
+                            _uiState.value = NutritionUiState.Error(result.error)
+                        } else {
+                            _uiState.value = NutritionUiState.Success(result, null)
+                        }
+                    } else {
+                        _uiState.value = NutritionUiState.Error("Analyst output failed to parse correctly.")
+                    }
+                } else {
+                    _uiState.value = NutritionUiState.Error("Nutritionist AI did not return a description. Please try again.")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _uiState.value = NutritionUiState.Error("Connection error: ${e.localizedMessage ?: "Unknown network failure"}")
+            }
+        }
+    }
+
+    private fun getSimulatedTextResponse(description: String): GeminiNutritionResponse {
+        val descLower = description.lowercase()
+        return when {
+            descLower.contains("egg") || descLower.contains("toast") -> {
+                GeminiNutritionResponse(
+                    mealName = "Scrambled Eggs & Sourdough Toast",
+                    totalCalories = 310.0,
+                    totalMacros = GeminiTotalMacros(proteinG = 16.0, carbsG = 22.0, fatG = 15.5, fiberG = 2.0),
+                    items = listOf(
+                        GeminiFoodItem(name = "Large Scrambled Eggs (2)", portionG = 100.0, calories = 140.0, proteinG = 12.0, carbsG = 1.0, fatG = 10.0, confidence = "high"),
+                        GeminiFoodItem(name = "Sourdough Toast (1 slice)", portionG = 40.0, calories = 110.0, proteinG = 4.0, carbsG = 20.0, fatG = 0.5, confidence = "high"),
+                        GeminiFoodItem(name = "Butter (for toast)", portionG = 7.0, calories = 60.0, proteinG = 0.0, carbsG = 0.0, fatG = 5.0, confidence = "medium")
+                    ),
+                    healthScore = 8.0,
+                    healthNote = "Excellent source of high-quality protein and amino acids to kickstart your day! Pair with spinach for iron.",
+                    warnings = emptyList()
+                )
+            }
+            descLower.contains("apple") || descLower.contains("banana") || descLower.contains("fruit") -> {
+                GeminiNutritionResponse(
+                    mealName = "Fresh Fruits and Nut Butter",
+                    totalCalories = 280.0,
+                    totalMacros = GeminiTotalMacros(proteinG = 7.0, carbsG = 34.0, fatG = 16.0, fiberG = 6.0),
+                    items = listOf(
+                        GeminiFoodItem(name = "Fresh Red Apple", portionG = 150.0, calories = 90.0, proteinG = 0.5, carbsG = 22.0, fatG = 0.3, confidence = "high"),
+                        GeminiFoodItem(name = "Creamy Peanut Butter (1.5 tbsp)", portionG = 24.0, calories = 190.0, proteinG = 6.5, carbsG = 12.0, fatG = 15.7, confidence = "high")
+                    ),
+                    healthScore = 9.0,
+                    healthNote = "Healthy source of complex dietary fiber and monounsaturated fats. Keeps blood sugar stable.",
+                    warnings = emptyList()
+                )
+            }
+            else -> {
+                GeminiNutritionResponse(
+                    mealName = "Custom Described Meal Log",
+                    totalCalories = 350.0,
+                    totalMacros = GeminiTotalMacros(proteinG = 20.0, carbsG = 40.0, fatG = 12.0, fiberG = 4.0),
+                    items = listOf(
+                        GeminiFoodItem(name = "Identified food item from description", portionG = 150.0, calories = 250.0, proteinG = 15.0, carbsG = 30.0, fatG = 8.0, confidence = "medium"),
+                        GeminiFoodItem(name = "Other mixed ingredient estimates", portionG = 50.0, calories = 100.0, proteinG = 5.0, carbsG = 10.0, fatG = 4.0, confidence = "low")
+                    ),
+                    healthScore = 8.0,
+                    healthNote = "A well-balanced quick log meal. Matches standard USDA macro estimates.",
+                    warnings = emptyList()
+                )
+            }
+        }
+    }
+
+    /**
+     * Logs custom manual meal input without AI.
+     */
+    fun logManualMeal(name: String, calories: Double, protein: Double, carbs: Double, fat: Double, fiber: Double) {
+        viewModelScope.launch {
+            try {
+                val warningsAdapter = moshi.adapter<List<String>>(Types.newParameterizedType(List::class.java, String::class.java))
+                val itemsAdapter = moshi.adapter<List<GeminiFoodItem>>(Types.newParameterizedType(List::class.java, GeminiFoodItem::class.java))
+
+                val warningsStr = warningsAdapter.toJson(emptyList())
+                val itemsStr = itemsAdapter.toJson(
+                    listOf(GeminiFoodItem(name = name, portionG = 0.0, calories = calories, proteinG = protein, carbsG = carbs, fatG = fat, confidence = "high"))
+                )
+
+                val mealLog = MealScan(
+                    mealName = name,
+                    totalCalories = calories,
+                    protein = protein,
+                    carbs = carbs,
+                    fat = fat,
+                    fiber = fiber,
+                    healthScore = 8,
+                    healthNote = "Custom logged manually.",
+                    warningsJson = warningsStr,
+                    itemsJson = itemsStr,
+                    localImagePath = null
+                )
+
+                repository.insert(mealLog)
+
+                _uiState.value = NutritionUiState.Idle
+                _selectedBitmap.value = null
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     fun runSimulatedScan(presetResId: Int? = null) {
         viewModelScope.launch {
             _uiState.value = NutritionUiState.Loading
             kotlinx.coroutines.delay(1200)
             val response = getSimulatedResponse(presetResId)
             _uiState.value = NutritionUiState.Success(response, _selectedBitmap.value, isSimulated = true)
+        }
+    }
+
+    fun runSimulatedTextScan(description: String) {
+        viewModelScope.launch {
+            _uiState.value = NutritionUiState.Loading
+            kotlinx.coroutines.delay(1200)
+            val response = getSimulatedTextResponse(description)
+            _uiState.value = NutritionUiState.Success(response, null, isSimulated = true)
         }
     }
 }
